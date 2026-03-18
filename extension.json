@@ -1,52 +1,69 @@
 {
 	"name": "Discord",
 	"author": [
-		"[https://github.com/jayktaylor Jayden Bailey]"
+		"[https://github.com/jayktaylor Jayden Bailey]",
+		"[https://kocka.tech Luka Simić]"
 	],
 	"url": "https://github.com/jayktaylor/mw-discord",
 	"version": "1.2",
 	"descriptionmsg": "discord-desc",
 	"license-name": "MIT",
+	"type": "other",
 	"requires": {
 		"MediaWiki": ">= 1.40.0"
 	},
-	"manifest_version": 1,
+	"manifest_version": 2,
+	"config_prefix": "wgDiscord",
 	"config": {
-		"DiscordWebhookURL": [],
-		"DiscordNoBots": true,
-		"DiscordNoMinor": false,
-		"DiscordNoNull": true,
-		"DiscordSuppressPreviews": true,
-		"DiscordMaxChars": null,
-		"DiscordMaxCharsUsernames": 25,
-		"DiscordDisabledHooks": [],
-		"DiscordDisabledNS": [],
-		"DiscordDisabledUsers": [
-			"Redirect fixer"
-		],
-		"DiscordPrependTimestamp": false,
-		"DiscordUseEmojis": false,
-		"DiscordEmojis": {
-			"PageSaveComplete": ":pencil2:",
-			"PageDeleteComplete": ":wastebasket:",
-			"PageUndeleteComplete": ":wastebasket:",
-			"ArticleRevisionVisibilitySet": ":spy:",
-			"ArticleProtectComplete": ":lock:",
-			"PageMoveComplete": ":truck:",
-			"LocalUserCreated": ":wave:",
-			"BlockIpComplete": ":no_entry_sign:",
-			"UnblockUserComplete": ":no_entry_sign:",
-			"UserGroupsChanged": ":people_holding_hands:",
-			"UploadComplete": ":inbox_tray:",
-			"FileDeleteComplete": ":wastebasket:",
-			"FileUndeleteComplete": ":wastebasket:",
-			"AfterImportPage": ":books:",
-			"ArticleMergeComplete": ":card_box:",
-			"ApprovedRevsRevisionApproved": ":white_check_mark:",
-			"ApprovedRevsRevisionUnapproved": ":white_check_mark:",
-			"ApprovedRevsFileRevisionApproved": ":white_check_mark:",
-			"ApprovedRevsFileRevisionUnapproved": ":white_check_mark:",
-			"RenameUserComplete": ":people_holding_hands:"
+		"WebhookURL": {
+			"description": "Array of Discord webhook URLs to send notifications to.",
+			"value": []
+		},
+		"DisabledNS": {
+			"description": "Array of MediaWiki namespaces for which notifications should not be sent.",
+			"public": true,
+			"value": []
+		},
+		"DisabledUsers": {
+			"description": "Array of usernames for which notifications should not be sent.",
+			"public": true,
+			"value": [
+				"Redirect fixer"
+			]
+		},
+		"Emojis": {
+			"description": "Mapping of MediaWiki hook names to Discord emojis to use in notifications.",
+			"public": true,
+			"value": {
+				"page-edited": ":pencil2:",
+				"page-created": ":pencil:",
+				"page-deleted": ":wastebasket:",
+				"page-undeleted": ":wastebasket:",
+				"rev-visibility-changed": ":spy:",
+				"page-protect": ":lock:",
+				"page-unprotect": ":unlock:",
+				"page-moved": ":truck:",
+				"user-registered": ":wave:",
+				"user-block": ":no_entry_sign:",
+				"user-change-block": ":no_entry_sign:",
+				"user-block-partial": ":no_entry_sign:",
+				"user-unblock": ":no_entry_sign:",
+				"user-groups-changed": ":people_holding_hands:",
+				"file-upload-new": ":inbox_tray:",
+				"file-upload": ":inbox_tray:",
+				"file-delete": ":wastebasket:",
+				"file-undelete": ":wastebasket:",
+				"import": ":books:",
+				"page-merge": ":card_box:",
+				"ext-approvedrevs-approved": ":white_check_mark:",
+				"ext-approvedrevs-unapproved": ":white_check_mark:",
+				"ext-approvedrevs-approved-file": ":white_check_mark:",
+				"ext-approvedrevs-unapproved-file": ":white_check_mark:",
+				"user-rename": ":people_holding_hands:",
+				"ext-abusefilter-hit": ":dart:",
+				"ext-abusefilter-create": ":pencil:",
+				"ext-abusefilter-modify": ":pencil2:"
+			}
 		}
 	},
 	"AutoloadNamespaces": {
@@ -59,7 +76,9 @@
 		"main": {
 			"class": "MediaWiki\\Extension\\Discord\\DiscordHooks",
 			"services": [
-				"Discord.DiscordMessageSender"
+				"Discord.Utils",
+				"TitleFactory",
+				"RevisionLookup"
 			]
 		}
 	},
@@ -74,7 +93,7 @@
 		"BlockIpComplete": "main",
 		"UnblockUserComplete": "main",
 		"UserGroupsChanged": "main",
-		"UploadComplete": "main",
+		"FileUpload": "main",
 		"FileDeleteComplete": "main",
 		"FileUndeleteComplete": "main",
 		"AfterImportPage": "main",
@@ -83,7 +102,19 @@
 		"ApprovedRevsRevisionUnapproved": "main",
 		"ApprovedRevsFileRevisionApproved": "main",
 		"ApprovedRevsFileRevisionUnapproved": "main",
+		"ManualLogEntryBeforePublish": "main",
+		"RecentChange_save": "main",
 		"RenameUserComplete": "main"
+	},
+	"JobClasses": {
+		"DiscordNotify": {
+			"class": "MediaWiki\\Extension\\Discord\\NotifyJob",
+			"services": [
+				"HttpRequestFactory",
+				"JobQueueGroup"
+			],
+			"needsPage": false
+		}
 	},
 	"ServiceWiringFiles": [
 		"src/ServiceWiring.php"

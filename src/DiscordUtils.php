@@ -2,198 +2,181 @@
 
 namespace MediaWiki\Extension\Discord;
 
-use MediaWiki\MediaWikiServices;
+use MediaWiki\Block\DatabaseBlock;
+use MediaWiki\Context\RequestContext;
+use MediaWiki\Http\HttpRequestFactory;
+use MediaWiki\JobQueue\JobQueueGroup;
+use MediaWiki\Revision\RevisionLookup;
 use MediaWiki\Revision\RevisionRecord;
-use MediaWiki\Title\Title;
+use MediaWiki\SpecialPage\SpecialPage;
 use MediaWiki\User\User;
+use MediaWiki\User\UserFactory;
+use MediaWiki\Title\Title;
 use MediaWiki\User\UserIdentity;
+use function count;
+use function in_array;
+use function is_string;
+use function sprintf;
 
 class DiscordUtils {
+	public const SERVICE_NAME = 'Discord.Utils';
+
+	private RequestContext $context;
+
+	public function __construct(
+		private readonly ExtensionConfig $config,
+		private readonly HttpRequestFactory $httpRequestFactory,
+		private readonly JobQueueGroup $jobQueueGroup,
+		private readonly RevisionLookup $revisionLookup,
+		private readonly UserFactory $userFactory,
+	) {
+		$this->context = RequestContext::getMain();
+	}
+
+	private function msg( string $key, string ...$params ): string {
+		return $this->context->msg( $key, ...$params )->inContentLanguage()->plain();
+	}
+
 	/**
 	 * Checks if criteria is met for this action to be cancelled
-	 * @param string $hook
-	 * @param int|null $ns
-	 * @param User|UserIdentity|null $user
-	 * @return bool
 	 */
-	public static function isDisabled(
-		string $hook, int|null $ns, User|UserIdentity|null $user
-	): bool {
-		global $wgDiscordDisabledHooks, $wgDiscordDisabledNS, $wgDiscordDisabledUsers;
-
-		if ( is_array( $wgDiscordDisabledHooks ) ) {
-			if ( in_array( strtolower( $hook ), array_map( 'strtolower', $wgDiscordDisabledHooks ) ) ) {
-				// Hook is disabled, return true
+	public function isDisabled( int|null $ns = null, UserIdentity|null $user = null ): bool {
+		$disabledNamespaces = $this->config->getDisabledNamespaces();
+		$disabledUsers = $this->config->getDisabledUsers();
+		if ( $ns !== null ) {
+			$ns = (int)$ns;
+			if ( in_array( $ns, $disabledNamespaces ) ) {
 				return true;
 			}
-		} else {
-			wfDebugLog( 'discord',
-				'The value of $wgDiscordDisabledHooks is not valid and therefore all hooks are enabled.' );
 		}
-		if ( is_array( $wgDiscordDisabledNS ) ) {
-			if ( $ns !== null ) {
-				$ns = (int)$ns;
-				if ( in_array( $ns, $wgDiscordDisabledNS ) ) {
-					// Namespace is disabled, return true
-					return true;
-				}
+		if ( $user instanceof UserIdentity ) {
+			if ( in_array( $user->getName(), $disabledUsers ) ) {
+				return true;
 			}
-		} else {
-			wfDebugLog( 'discord',
-				'The value of $wgDiscordDisabledNS is not valid and therefore all namespaces are enabled.' );
-		}
-		if ( is_array( $wgDiscordDisabledUsers ) ) {
-			if ( $user !== null ) {
-				if ( $user instanceof UserIdentity ) {
-					$user = MediaWikiServices::getInstance()->getUserFactory()->newFromUserIdentity( $user );
-				}
-
-				if ( $user instanceof User ) {
-					if ( in_array( $user->getName(), $wgDiscordDisabledUsers ) ) {
-						// User shouldn't trigger a message, return true
-						return true;
-					}
-				}
+			if ( $this->userFactory->newFromUserIdentity( $user )->isBot() ) {
+				return true;
 			}
-		} else {
-			wfDebugLog( 'discord',
-				'The value of $wgDiscordDisabledUsers is not valid and therefore all users can trigger messages.' );
 		}
-
 		return false;
+	}
+
+	public function getBlockTarget( DatabaseBlock $block ): User|string {
+		$target = $block->getTargetUserIdentity();
+		if ( $target === null ) {
+			return $block->getTargetName();
+		} else {
+			return $this->userFactory->newFromUserIdentity( $target );
+		}
+	}
+
+	/**
+	 * Queues a job for sending a message to Discord.
+	 */
+	public function send( string $msg, string ...$params ): void {
+		$urls = $this->config->getWebhookURL();
+		if ( empty( $urls ) ) {
+			return;
+		}
+		$message = $this->context->msg( "discord-msg-$msg", ...$params );
+		if ( $message->isDisabled() ) {
+			return;
+		}
+
+		$content = $message->inContentLanguage()->plain();
+		$content = preg_replace( '/\s+/', ' ', $content );
+
+		$emoji = $this->config->getEmoji( $msg );
+		if ( $emoji !== null ) {
+			$content = "$emoji $content";
+		}
+
+		$this->jobQueueGroup->lazyPush( NotifyJob::newSpec( $urls, $content ) );
 	}
 
 	/**
 	 * Creates a formatted markdown link based on text and given URL
-	 * @param string $text
-	 * @param string $url
-	 * @return string
 	 */
-	public static function createMarkdownLink( string $text, string $url ): string {
-		global $wgDiscordSuppressPreviews;
-
-		return "[" . $text . "]" . '(' . ( $wgDiscordSuppressPreviews ? '<' : '' ) .
-			self::encodeURL( $url ) . ( $wgDiscordSuppressPreviews ? '>' : '' ) . ')';
+	public function formatLink( string $text, string|Title $url ): string {
+		if ( $url instanceof Title ) {
+			$url = $url->getFullURL( '', false, PROTO_CANONICAL );
+		}
+		$url = str_replace( ' ', '%20', $url );
+		$url = str_replace( '(', '%28', $url );
+		$url = str_replace( ')', '%29', $url );
+		return "[$text](<$url>)";
 	}
 
 	/**
 	 * Creates links for a specific MediaWiki User object
-	 * @param User|UserIdentity|string $user
-	 * @return string
 	 */
-	public static function createUserLinks( User|UserIdentity|string $user ): string {
-		global $wgDiscordMaxCharsUsernames;
-
-		if ( $user instanceof UserIdentity ) {
-			// If we were passed a UserIdentity object, get the relevant user.
-			$user = MediaWikiServices::getInstance()->getUserFactory()->newFromUserIdentity( $user );
+	public function formatUser( UserIdentity|string $user ): string {
+		if ( is_string( $user ) ) {
+			return $this->msg( 'discord-userlinks', $user, 'n/a', 'n/a' );
 		}
-
-		if ( $user instanceof User ) {
-			$isAnon = $user->isAnon();
-			$contribs = Title::newFromText( "Special:Contributions/" . $user );
-			$user_abbr = strval( $user );
-
-			if ( $wgDiscordMaxCharsUsernames ) {
-				if ( strlen( $user_abbr ) > $wgDiscordMaxCharsUsernames ) {
-					$user_abbr = substr( $user_abbr, 0, $wgDiscordMaxCharsUsernames );
-					$user_abbr = $user_abbr . '...';
-				}
-			}
-
-			$userPage = self::createMarkdownLink( $user_abbr, ( $isAnon ? $contribs : $user->getUserPage() )
-				->getFullURL( '', false, PROTO_CANONICAL ) );
-			$userTalk = self::createMarkdownLink( wfMessage( 'discord-talk' )->inContentLanguage()->text(),
-				$user->getTalkPage()->getFullURL( '', false, PROTO_CANONICAL ) );
-			$userContribs = self::createMarkdownLink( wfMessage( 'discord-contribs' )->inContentLanguage()->text(),
-				$contribs->getFullURL( '', false, PROTO_CANONICAL ) );
-			$text = wfMessage( 'discord-userlinks', $userPage, $userTalk, $userContribs )->inContentLanguage()->text();
-		} else {
-			// If we were given a string, handle this differently.
-			$text = wfMessage( 'discord-userlinks', $user, 'n/a', 'n/a' )->inContentLanguage()->text();
-		}
-		return $text;
+		$user = $this->userFactory->newFromUserIdentity( $user );
+		return $this->msg(
+			'discord-userlinks',
+			$this->formatLink( $user->getName(), $user->getUserPage() ),
+			$this->formatLink( $this->msg( 'discord-talk' ), $user->getTalkPage() ),
+			$this->formatLink( $this->msg( 'discord-contribs' ), SpecialPage::getTitleFor( 'Contributions', $user->getName() ) ),
+		);
 	}
 
 	/**
 	 * Creates formatted text for a specific Revision object
-	 * @param RevisionRecord $revision
-	 * @return string
 	 */
-	public static function createRevisionText( RevisionRecord $revision ): string {
-		$diff = self::createMarkdownLink( wfMessage( 'discord-diff' )->inContentLanguage()->text(),
-			Title::newFromLinkTarget( $revision->getPageAsLinkTarget() )->getFullURL(
-				[ 'diff' => 'prev', 'oldid' => $revision->getId() ], false, PROTO_CANONICAL ) );
-		$minor = '';
+	public function formatRevision( RevisionRecord $revision ): string {
+		$diff = $this->formatLink(
+			$this->msg( 'discord-diff' ),
+			Title::newFromLinkTarget( $revision->getPageAsLinkTarget() )->getFullURL( [
+				'diff' => 'prev',
+				'oldid' => $revision->getId(),
+				'ref' => 'discord',
+			], false, PROTO_CANONICAL )
+		);
+		$minor = $revision->isMinor() ? $this->msg( 'discord-minor' ) : '';
 		$size = '';
-		if ( $revision->isMinor() ) {
-			$minor .= wfMessage( 'discord-minor' )->inContentLanguage()->text();
-		}
 		$parentId = $revision->getParentId();
 		if ( $parentId ) {
-			$parent = MediaWikiServices::getInstance()->getRevisionLookup()->getRevisionById( $parentId );
+			$parent = $this->revisionLookup->getRevisionById( $parentId );
 			if ( $parent ) {
-				$size .= wfMessage( 'discord-size', sprintf( "%+d", $revision->getSize() - $parent->getSize() ) )
-					->inContentLanguage()->text();
+				$diffSize = $revision->getSize() - $parent->getSize();
+				$size = $this->msg( 'discord-size', sprintf( "%+d", $diffSize ) );
+				if ( $diffSize > 500 || $diffSize < -500 ) {
+					$size = "**$size**";
+				}
 			}
 		}
-		if ( $size == '' ) {
-			$size .= wfMessage( 'discord-size', sprintf( "%d", $revision->getSize() ) )->inContentLanguage()->text();
+		if ( $size === '' ) {
+			$revSize = $revision->getSize();
+			$size = $this->msg( 'discord-size', sprintf( "%d", $revSize ) );
+			if ( $revSize > 500 || $revSize < -500 ) {
+				$size = "**$size**";
+			}
 		}
-		return wfMessage( 'discord-revisionlinks', $diff, $minor, $size )->inContentLanguage()->text();
-	}
-
-	/**
-	 * Strip bad characters from a URL
-	 * @param string $url
-	 * @return string
-	 */
-	public static function encodeURL( string $url ): string {
-		$url = str_replace( " ", "%20", $url );
-		$url = str_replace( "(", "%28", $url );
-		return str_replace( ")", "%29", $url );
+		return $this->msg( 'discord-revisionlinks', $diff, $minor, $size );
 	}
 
 	/**
 	 * Formats bytes to a string representing B, KB, MB, GB, TB
-	 * @param int $bytes
-	 * @param ?int $precision
-	 * @return string
 	 */
-	public static function formatBytes( int $bytes, ?int $precision = 2 ): string {
+	public function formatBytes($bytes, $precision = 2 ): string {
 		$units = [ 'B', 'KB', 'MB', 'GB', 'TB' ];
-
 		$bytes = max( $bytes, 0 );
 		$pow = floor( ( $bytes ? log( $bytes ) : 0 ) / log( 1024 ) );
 		$pow = min( $pow, count( $units ) - 1 );
-
-		$bytes /= ( 1 << ( 10 * $pow ) );
-
+		$bytes /= 1 << ( 10 * $pow );
 		return round( $bytes, $precision ) . ' ' . $units[$pow];
 	}
 
 	/**
-	 * Truncate text to maximum allowed characters
-	 * @param string $text
-	 * @return string
+	 * Formats summaries (edit summaries, log reasons, etc.) as inline code.
 	 */
-	public static function truncateText( string $text ): string {
-		global $wgDiscordMaxChars;
-		if ( $wgDiscordMaxChars ) {
-			if ( strlen( $text ) > $wgDiscordMaxChars ) {
-				$text = substr( $text, 0, $wgDiscordMaxChars );
-				$text = $text . '...';
-			}
+	public function formatSummary( string|null $text ): string {
+		if ( empty( $text ) ) {
+			return '';
 		}
-		return $text;
-	}
-
-	/**
-	 * Sanitise text input to remove the potential for abuse of Discord's role pings.
-	 * @param string $text
-	 * @return string
-	 */
-	public static function sanitiseText( string $text ): string {
-		return preg_replace( '/([`@])/', '', $text );
+		$text = str_replace( '`', '', $text );
+		return "`$text`";
 	}
 }
