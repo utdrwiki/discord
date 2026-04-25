@@ -42,7 +42,6 @@ use MediaWiki\Storage\Hook\PageSaveCompleteHook;
 use MediaWiki\Title\ForeignTitle;
 use MediaWiki\Title\Title;
 use MediaWiki\Title\TitleFactory;
-use MediaWiki\Upload\UploadBase;
 use MediaWiki\User\Hook\UserGroupsChangedHook;
 use MediaWiki\User\User;
 use MediaWiki\User\UserGroupMembership;
@@ -95,7 +94,7 @@ class DiscordHooks implements
 	 * @param UserIdentity $userIdentity
 	 * @param string $summary
 	 * @param int $flags
-	 * @param RevisionRecord $revisionRecord
+	 * @param RevisionRecord $revision
 	 * @param EditResult $editResult
 	 * @return bool
 	 */
@@ -361,7 +360,7 @@ class DiscordHooks implements
 			'file-upload',
 			$this->utils->formatUser( $file->getUploader() ),
 			$reupload ? $this->msg( 'discord-msg-file-upload-new' ) : '',
-			$this->utils->formatLink( $file->getName(), $file->getTitle() ),
+			$this->utils->formatLink( $file->getTitle(), $file->getTitle() ),
 			$this->utils->formatSummary( $comment ),
 			$this->utils->formatBytes( $file->getSize() ),
 			$file->getWidth(),
@@ -391,7 +390,7 @@ class DiscordHooks implements
 		$this->utils->send(
 			'file-delete',
 			$this->utils->formatUser( $user ),
-			$this->utils->formatLink( $file->getName(), $file->getTitle() ),
+			$this->utils->formatLink( $file->getTitle(), $file->getTitle() ),
 			$this->utils->formatSummary( $reason ),
 		);
 	}
