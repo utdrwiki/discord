@@ -103,6 +103,9 @@ class DiscordUtils {
 		$url = str_replace( ' ', '%20', $url );
 		$url = str_replace( '(', '%28', $url );
 		$url = str_replace( ')', '%29', $url );
+		if ( str_ends_with( $url, '%25' ) ) {
+			$url = "{$url}_";
+		}
 		return "[$text](<$url>)";
 	}
 
